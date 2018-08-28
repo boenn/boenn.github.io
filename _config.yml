@@ -13,7 +13,7 @@ github_repo: "https://github.com/boenn/boenn.github.io.git" # you code repositor
 # Sidebar settings
 sidebar: true                           # whether or not using Sidebar.
 sidebar-about-description: "Creed"
-sidebar-avatar: /img/2-1.png      # use absolute URL, seeing it's used in both `/` and `/about/`
+sidebar-avatar: /img/头像.png      # use absolute URL, seeing it's used in both `/` and `/about/`
 
 
 
