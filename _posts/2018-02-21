@@ -1,0 +1,402 @@
+---
+layout:     post
+title:      Go语言的测试
+date:       2018-02-21
+author:     BY
+header-img: img/Test.jpg
+catalog: true
+tags:
+    - Go
+---
+# 1.go test工具
+
+在一个包目录中，以_test.go结尾的文件不是go build命令编译的目标，而是go test编译的目标。
+
+在*_test.go文件中，有三种函数需要特殊对待：
+- 功能测试函数：以Test前缀命名的函数，用来检测一些程序逻辑的正确性，go test运行测试函数，报告结果是PASS还是FAIL。
+- 基准测试函数：以Benchmark开头，用来测试某些操作的性能，go test汇报操作的平均执行时间。
+- 示例函数：以Example开头，用来提供机器检查过的文档。
+
+go test工具扫描*_test.go文件来寻找特殊函数，并生成一个临时的main包来调用他们，然后编译和运行，并汇报结果，最后清空临时文件。
+
+# 2.Test函数
+
+定义了个示例包 这个包包含一个函数IsPalindrome，用来判断一个字符串是否是回文字符串：
+
+```
+func IsPalindrome(s string) bool {
+	for i,_ := range s {
+		if s[i] != s[len(s)-1-i] {
+			return false
+		}
+	}
+	return true
+}
+```
+
+同一个目录下，另写*_test.go文件，进行测试。该文件包含了两个测试函数TestPalindrome和TestNonPalindrome。两个函数都检查IsPalindrome是否针对单个输入参数给出了正确的结果，同时用t.Error报错。
+
+```
+func TestPalindrome(t *testing.T) {
+	if !IsPalindrome("detartrated") {
+		t.Error(`IsPalindrome("detartrated") = false`)
+	}
+	if !IsPalindrome("kayak") {
+		t.Error(`IsPalindrome("kayak") = false`)
+	}
+}
+
+func TestNonPalindrome(t *testing.T) {
+	if IsPalindrome("palindrome") {
+		t.Error(`IsPalindrome("palindrome") = true`)
+	}
+}
+```
+测试结果如下：
+
+![11.2-1](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-1.png)
+
+测试通过，但是还有一些小bug，比如以下例子(法语和句子)：
+
+```
+func TestFrenchPalindrome(t *testing.T) {
+	if !IsPalindrome("été") {
+		t.Error(`IsPalindrome("été") = false`)
+	}
+}
+
+func TestCanalPalindrome(t *testing.T) {
+	input := "A man, a plan, a canal: Panama"
+	if !IsPalindrome(input) {
+		t.Errorf(`IsPalindrome(%q) = false`, input)
+	}
+}
+```
+经过测试，结果如下：
+
+![11.2-2](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-2.png)
+
+go test失败，此时`-v`可以输出包中每个测试用例的名称和执行时间：
+
+![11.2-3](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-3.png)
+
+选项`-run`的参数是一个正则表达式，它可以使得go test只运行那些测试函数名称匹配给定模式的函数：
+
+![11.2-4](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-4.png)
+
+显然以上的bug，一个是非ASCII字符，另一个是没有忽略空格、标点符号和字母大小写。
+
+此时修改IsPalindrome函数：
+
+```
+func IsPalindrome(s string) bool {
+	var letters []rune
+	for _,r := range s {
+		if unicode.IsLetter(r) {
+			letters = append(letters, unicode.ToLower(r))
+		}
+	}
+	for i := range letters {
+		if letters[i] != letters[len(letters)-1-i]{
+			return false
+		}
+	}
+	return true
+}
+```
+同时，写出更全面的测试样例，并统一到一起：
+
+```
+func TestIsPalindrome(t *testing.T) {
+	var tests = []struct {
+		input string
+		want  bool
+	}{
+		{"", true},
+		{"a", true},
+		{"aa", true},
+		{"ab", false},
+		{"kayak", true},
+		{"detartrated", true},
+		{"A man, a plan, a canal: Panama", true},
+		{"Evil I did dwell; lewd did I live.", true},
+		{"Able was I ere I saw Elba", true},
+		{"été", true},
+		{"Et se resservir, ivresse reste.", true},
+		{"palindrome", false}, // non-palindrome
+		{"desserts", false},   // semi-palindrome
+	}
+	for _, test := range tests {
+		if got := IsPalindrome(test.input); got != test.want {
+			t.Errorf("IsPalindrome(%q) = %v", test.input, got)
+		}
+	}
+}
+```
+测试，结果如下：
+
+![11.2-5](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-5.png)
+
+## 随机测试
+
+以上是`基于表`的测试方式，方便针对精心选择的输入检测函数是否工作正常，以测试逻辑上引人关注的用例。
+
+另一种方式是**随机测试**，通过构建随机输入来扩展测试的覆盖范围。通过构建符合某种模式的输出，可以指定它们对应的输出是什么。
+
+下面的例子randomPalindrome函数产生了一系列的回文字符串，这些输出在构建的时候就确定是回文字符串了，下面修改test函数：
+
+```
+func randomPalindrome(rng rand.Rand) string {
+	n := rng.Intn(25) // 最大字符串长度为24
+	runes := make([]rune, n)
+	for i := 0; i < (n+1)/2; i++ {
+		r := rune(rng.Intn(0x1000))
+		runes[i] = r
+		runes[n-1-i] = r
+	}
+	return string(runes)
+}
+
+func TestRandomPalindromes(t *testing.T) {
+	// 初始化一个伪随机数生成器
+	seed := time.Now().UTC().UnixNano()
+	t.Logf("Random seed: %d", seed)
+	rng := rand.New(rand.NewSource(seed))
+
+	for i := 0; i < 1000; i++ {
+		p := randomPalindrome(rng)
+		if !IsPalindrome(p) {
+			t.Errorf("IsPalindrome(%q) = false", p)
+		}
+	}
+}
+```
+## 测试命令
+
+go test工具对测试库代码包很有用，但是也可以将它用于测试命令。包名main一般会产生可执行文件。
+
+可以写一个echo程序的测试，把程序分为两个函数，echo执行逻辑，而main用来读取和解析命令行参数以及报告echo函数可能返回的错误：
+
+```
+var (
+	n = flag.Bool("n", false, "omit trailing newline")
+	s = flag.String("s", " ", "separator")
+)
+
+var out io.Writer = os.Stdout
+
+func main() {
+	flag.Parse()
+	if err := echo(!*n, *s, flag.Args());err != nil {
+		fmt.Fprintf(os.Stderr, "echo: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func echo(newline bool, sep string, args []string,)error  {
+	fmt.Fprint(out, strings.Join(args, sep))
+	if newline {
+		fmt.Fprintln(out)
+	}
+	return nil
+}
+```
+然后写测试用例：
+
+```
+func TestEcho(t *testing.T) {
+	var tests = []struct {
+		newline bool
+		sep     string
+		args    []string
+		want    string
+	}{
+		{true, "", []string{}, "\n"},
+		{false, "", []string{}, ""},
+		{true, "\t", []string{"one", "two", "three"}, "one\ttwo\tthree\n"},
+		{true, ",", []string{"a", "b", "c"}, "a,b,c\n"},
+		{false, ":", []string{"1", "2", "3"}, "1:2:3"},
+		{true, ",", []string{"a", "b", "c"}, "a b c\n"},
+	}
+
+	for _, test := range tests {
+		descr := fmt.Sprintf("echo(%v, %q, %q)",
+			test.newline, test.sep, test.args)
+
+		out = new(bytes.Buffer) // 捕获的输出
+		if err := echo(test.newline, test.sep, test.args); err != nil {
+			t.Errorf("%s failed: %v", descr, err)
+			continue
+		}
+		got := out.(*bytes.Buffer).String()
+		if got != test.want {
+			t.Errorf("%s = %q, want %q", descr, got, test.want)
+		}
+	}
+}
+```
+测试结果如下：
+
+![11.2-6](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.2-6.png)
+
+错误消息描述了想要进行的操作(使用了类似Go的语法)，然后依次是实际行为和预期的结果。有了这样详细的错误消息，在定位测试的源代码之前就很容易了解错误的根源了。
+
+
+## 白盒测试
+
+基于对所要进行测试的包的内部了解程度。分为**黑盒测试**和**白盒测试**。
+- 黑盒测试：假设测试者对报的了解仅通过公开的API和文档，不知道包的内部逻辑。
+- 白盒测试：可以访问报的内部函数和数据结构，并且可以做一些常规用户无法做到的观察和改动。
+
+二者是互补的。黑盒测试帮助测试者关注包的用户和API的设计缺陷，白盒测试可以对实现的特定之处提供更详细的覆盖测试。
+
+显然，之前的TestIsPalindrome函数进调用导出的函数IsPalindrome，是个黑盒测试。而TestEcho调用Echo函数并且更新全局变量out，无论函数echo还是变了out都是未导出的，是个白盒测试。
+
+# 3.覆盖率
+
+从本质上来说，测试永远不会结束。无论多少测试都无法证明一个包是没有bug的。
+
+一个**测试套件**覆盖**待测试包**的比例称为测试的覆盖率。覆盖率无法直接通过数量来衡量，任何事情都是动态的。**语句覆盖率**是一种最简单且广泛使用的方法之一。一个测试套件的语句覆盖率是指部分语句在一次执行中至少执行一次。这里使用Go的cover工具，这个工具被继承到了go test中，用来衡量语句覆盖率并帮助识别测试之间的明显差别。
+
+语句使用方法：
+
+    go tool cover
+
+命令go tool运行Go工具链里面的一个可执行文件。可附加`-coverprofile`标记来运行测试：
+
+    go test -run=xxx -coverprofile=c.out Go_demo/word
+    
+这个标记通过检测产品代码，启用了覆盖数据收集。也就是说，它修改了源代码的副本，这样在每个语句执行之前，设置一个布尔变量，每个语句块都对应一个变量。在修改的程序退出之前，它将每个变量的值都写入到指定的`c.out`日志文件中并且输出被执行语句的汇总信息。
+
+如果go test命令指定了 `-covermode=count`标记，每个语句块的检测会递增一个计数器而不是布尔量。生成数据之后，可以运行cover工具，处理生成的日志，生成一个HTML报告，并用浏览器打开：
+
+    go tool cover -html=c.out
+
+
+# 4.Benchmark函数
+
+基准测试就是在一定的工作负载之下检测程序性能的一种方法。在Go里面，基准测试函数看上去像一个测试函数，但是前缀`Benchmark`并且拥有一个`*testing.B`参数用来提供大多数和`*testing.T`相同的方法，额外增加了一些与性能检测相关方法。还提供了一个整型成员`N`，用来指定被检测操作的执行次数。
+
+下面是对之前的`IsPalindrome`函数的基准测试，它在一个循环中调用了`IsPalindrome`共8次。
+
+
+```
+func IsPalindrome(s string) bool {
+	var letters []rune
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			letters = append(letters, unicode.ToLower(r))
+		}
+	}
+	for i := range letters {
+		if letters[i] != letters[len(letters)-1-i] {
+			return false
+		}
+	}
+	return true
+}
+```
+
+
+
+```
+func BenchmarkIsPalindrome(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		IsPalindrome("A man, a plan, a canal: Panama")
+	}
+}
+```
+
+要进行基准测试，需标记`-bench`参数来指定。它是一个匹配`Benchmark`函数名称的正则表达式。模式`.`使它匹配包word中所有的基准测试函数，因为这里只有一个基准测试函数，所以和指定`-bench=IsPalindrome`没区别。测试结果如下：
+
+![11.4-1](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.4-1.png)
+
+
+这里的`8`表示GOMAXPROCS，对于并发基准测试很重要。上述结果说明每次`IsPalindrome`调用耗时0.4ms，这个是3000000次调用的平均值。使用基准测试函数来实现循环而不是在测试驱动程序中调用代码的原因是：在基准测试函数中在循环外面可以执行一些必要的初始化代码并且这段时间不加到每次迭代的的时间中。
+
+可对程序进行优化，使`IsPalindrome`函数第二次循环在中间停止检测，避免比较两次：
+
+```
+func IsPalindrome(s string) bool {
+	var letters []rune
+	n := len(letters)/2
+
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+		letters = append(letters, unicode.ToLower(r))
+	}
+	}
+	for i := 0; i < n; i++ {
+		if letters[i] != letters[len(letters)-1-i] {
+			return false
+		}
+	}
+	return true
+}
+```
+结果如下：
+
+![11.4-2](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.4-2.png)
+
+还可以为`letters`预分配一个容量足够大的数组，而不是通过连续的`append`调用来追加：
+
+```
+func IsPalindrome(s string) bool {
+	letters := make([]rune, 0, len(s))
+	n := len(letters)/2
+
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+		letters = append(letters, unicode.ToLower(r))
+	}
+	}
+	for i := 0; i < n; i++ {
+		if letters[i] != letters[len(letters)-1-i] {
+			return false
+		}
+	}
+	return true
+}
+```
+测试结果如下：
+
+![11.4-3](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.4-3.png)
+
+基本上，最快的程序通常是那些进行内存分配次数最少的程序。命令行标记`-benchmem`在报告中包含了内存分配统计数据。
+
+![11.4-4](https://github.com/boenn/MarkdownPhotos/raw/master/Go/%E7%AC%AC%E4%B8%83%E7%AB%A0/11.4-4.png)
+
+对一个应用使用一系列的大小进行基准测试可以帮助我们选择最小的缓冲区并带来最佳的性能表现。同时，对于两个不同的算法使用相同的输入，在重要的或者具有代表性的工作负载下，进行基准测试通常可以显示出每个算法的优点和缺点。
+
+基准测试比较揭示的模式在程序设计阶段很有用处，但是即使程序正常工作了，我们也不会丢掉基准测试。随着程序的演变，或者它的输入增长了，或者它被部署在其他的操作系统上并拥有一些新特征，我们仍然可以重用基准测试来回顾当初的设计决策。
+
+# 5.Example函数
+
+被go test特殊对待的第三种函数就是**示例函数**，它们的名字以`Example`开头，它既没有参数，也没有结果。这里是`IsPalindrome`的一个示例函数：
+
+```
+func ExampleIsPalindrome() {
+	fmt.Println(IsPalindrome("a man, a plan, a canal: Panama"))
+	fmt.Println(IsPalindrome("palindrome"))
+	// 输出
+	// true
+	// false
+}
+```
+这种示例函数，有三个目的：
+
+1. 首要目的是作为文档：示例可以用来演示同一个API中的类型和函数之间的交互，而文档则总是要重点介绍某个点，要么是类型，要么是函数或者整个包。
+2. 第二个目的是，**它们是可以通过go test运行的可执行测试**。如果一个示例函数最后包含一个类似这样的注释`// xxx`，测试驱动程序将执行这个函数并且检查输出到终端的内容匹配这个注释中的文本。
+3. 第三个目的是，提供手写实验代码。
+
+
+
+
+
+
+
+
+
+
+
+
